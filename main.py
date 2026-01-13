@@ -11,7 +11,6 @@ import subprocess
 import platform
 
 
-
 # ---------------------------------------------------
 # LOAD API KEYS
 # ---------------------------------------------------
@@ -23,7 +22,6 @@ def load_api_keys(file_path="api_keys.txt"):
                 key, value = line.strip().split("=", 1)
                 api_keys[key] = value
     return api_keys
-
 
 
 # ---------------------------------------------------
@@ -42,10 +40,8 @@ def parse_msg_file(file_path):
 
     body = msg.body
 
-    # Extract URLs
     urls = re.findall(r"(https?://[^\s]+)", body)
 
-    # Extract attachments
     attachments = []
     for att in msg.attachments:
         content = att.data
@@ -60,15 +56,14 @@ def parse_msg_file(file_path):
     return headers, body, urls, attachments
 
 
-
 # ---------------------------------------------------
 # VIRUSTOTAL URL LOOKUP
 # ---------------------------------------------------
 def vt_url_lookup(api_key, url):
     try:
-        encoded_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+        encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
         r = requests.get(
-            f"https://www.virustotal.com/api/v3/urls/{encoded_id}",
+            f"https://www.virustotal.com/api/v3/urls/{encoded}",
             headers={"x-apikey": api_key}
         )
         if r.status_code != 200:
@@ -76,7 +71,6 @@ def vt_url_lookup(api_key, url):
         return r.json()["data"]["attributes"]["last_analysis_stats"]
     except Exception as e:
         return {"error": str(e)}
-
 
 
 # ---------------------------------------------------
@@ -95,23 +89,19 @@ def vt_hash_lookup(api_key, sha256):
         return {"error": str(e)}
 
 
-
 # ---------------------------------------------------
 # OTX LOOKUP
 # ---------------------------------------------------
 def otx_lookup(api_key, indicator):
     try:
         for t in ["IPv4", "url", "file"]:
-            r = requests.get(
-                f"https://otx.alienvault.com/api/v1/indicators/{t}/{indicator}/general",
-                headers={"X-OTX-API-KEY": api_key},
-            )
+            url = f"https://otx.alienvault.com/api/v1/indicators/{t}/{indicator}/general"
+            r = requests.get(url, headers={"X-OTX-API-KEY": api_key})
             if r.status_code == 200:
                 return r.json()
         return {"error": "OTX Not Found"}
     except Exception as e:
         return {"error": str(e)}
-
 
 
 # ---------------------------------------------------
@@ -122,7 +112,7 @@ def abuseipdb_lookup(api_key, ip):
         r = requests.get(
             "https://api.abuseipdb.com/api/v2/check",
             headers={"Key": api_key, "Accept": "application/json"},
-            params={"ipAddress": ip, "maxAgeInDays": 30},
+            params={"ipAddress": ip, "maxAgeInDays": 30}
         )
         if r.status_code != 200:
             return {"error": f"AbuseIPDB Error {r.status_code}"}
@@ -131,14 +121,13 @@ def abuseipdb_lookup(api_key, ip):
         return {"error": str(e)}
 
 
-
 # ---------------------------------------------------
 # BEAUTIFY FUNCTIONS
 # ---------------------------------------------------
-def beautify_vt(stats):
-    if "error" in stats:
+def beautify_vt(data):
+    if "error" in data:
         return "Error"
-    return f"Malicious:{stats.get('malicious',0)} Suspicious:{stats.get('suspicious',0)} Harmless:{stats.get('harmless',0)}"
+    return f"Malicious:{data.get('malicious',0)} Suspicious:{data.get('suspicious',0)} Harmless:{data.get('harmless',0)}"
 
 
 def beautify_otx(data):
@@ -158,9 +147,8 @@ def beautify_abuseip(data):
     )
 
 
-
 # ---------------------------------------------------
-# APPLY COLOR CODING
+# SEVERITY COLOR CODING
 # ---------------------------------------------------
 def apply_color(cell, vt_text=None, abuse_text=None):
     red = PatternFill(start_color="FFC7CE", fill_type="solid")
@@ -187,46 +175,50 @@ def apply_color(cell, vt_text=None, abuse_text=None):
             cell.fill = green
 
 
-
 # ---------------------------------------------------
 # MULTITHREAD WRAPPER
 # ---------------------------------------------------
 def parallel_execute(func, items, *args):
     results = []
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_map = {executor.submit(func, *args, item): item for item in items}
-        for future in as_completed(future_map):
-            indicator = future_map[future]
+        mapper = {executor.submit(func, *args, item): item for item in items}
+        for future in as_completed(mapper):
+            ind = mapper[future]
             try:
-                results.append((indicator, future.result()))
+                results.append((ind, future.result()))
             except Exception as e:
-                results.append((indicator, {"error": str(e)}))
+                results.append((ind, {"error": str(e)}))
     return results
 
 
-
 # ---------------------------------------------------
-# WRITE EXCEL REPORT + OPEN FILE
+# EXCEL REPORT GENERATION
 # ---------------------------------------------------
 def write_to_excel(headers, url_results, ip_result, attachment_results, output="email_report.xlsx"):
-
     wb = Workbook()
 
-    # -------------------- HEADERS SHEET --------------------
+    # ---------------- HEADERS SHEET ----------------
     ws1 = wb.active
     ws1.title = "Headers"
     ws1.append(["Field", "Value"])
 
     for k, v in headers.items():
+
+        # SANITIZATION FIX
+        if isinstance(v, bytes):
+            v = v.decode(errors="ignore")
+        elif not isinstance(v, str):
+            v = str(v)
+
         ws1.append([k, v])
 
-    # -------------------- REPUTATION SHEET --------------------
+    # ---------------- REPUTATION SHEET ----------------
     ws2 = wb.create_sheet("Reputation")
     ws2.append(["Type", "Indicator", "VirusTotal", "AbuseIPDB", "OTX"])
 
     row = 2
 
-    # URL Results
+    # URLS
     for url, vt, otx in url_results:
         vt_text = beautify_vt(vt)
         otx_text = beautify_otx(otx)
@@ -234,7 +226,7 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
         apply_color(ws2[f"C{row}"], vt_text, None)
         row += 1
 
-    # IP result
+    # IP Info
     if ip_result:
         ip, vt_ip, abuse, otx_ip = ip_result
         vt_text = beautify_vt(vt_ip)
@@ -242,11 +234,11 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
         otx_text = beautify_otx(otx_ip)
 
         ws2.append(["IP", ip, vt_text, abuse_text, otx_text])
-        apply_color(ws2[f"C{row}"], vt_text, None)
+        apply_color(ws2[f"C{row}"], vt_text)
         apply_color(ws2[f"D{row}"], None, abuse_text)
         row += 1
 
-    # Attachments
+    # ATTACHMENTS
     for sha, vt, otx in attachment_results:
         vt_text = beautify_vt(vt)
         otx_text = beautify_otx(otx)
@@ -254,7 +246,7 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
         apply_color(ws2[f"C{row}"], vt_text, None)
         row += 1
 
-    # -------------------- STYLING (BORDERS + HEADER COLOR) --------------------
+    # ---------------- STYLING ----------------
     thin = Side(style="thin")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     header_fill = PatternFill(start_color="4B0082", fill_type="solid")
@@ -270,16 +262,16 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
             for cell in r:
                 cell.border = border
 
-    # Auto column widths
+    # Auto column width
     for sheet in [ws1, ws2]:
         for col in sheet.columns:
             max_len = max(len(str(c.value)) if c.value else 0 for c in col)
             sheet.column_dimensions[col[0].column_letter].width = max_len + 3
 
     wb.save(output)
-    print(f"\n[+] Excel file generated: {output}\n")
+    print(f"\n[+] Excel report generated: {output}")
 
-    # -------------------- AUTO OPEN EXCEL FILE --------------------
+    # Auto open file
     try:
         if platform.system() == "Windows":
             os.startfile(output)
@@ -288,30 +280,28 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
         else:
             subprocess.call(["xdg-open", output])
     except:
-        print("[!] Could not automatically open the Excel file.")
-
+        print("[!] Could not automatically open the file.")
 
 
 # ---------------------------------------------------
-# MAIN EXECUTION LOGIC
+# MAIN LOGIC
 # ---------------------------------------------------
 if __name__ == "__main__":
 
-    input_file = "sample.msg"  # <---- CHANGE TO YOUR MSG FILE
+    input_file = "sample.msg"  # <--- Change this
 
     api = load_api_keys()
 
     headers, body, urls, attachments = parse_msg_file(input_file)
 
-    # ---------------------- URL REPUTATION ----------------------
+    # URL reputation
     vt_url_res = parallel_execute(vt_url_lookup, urls, api["VIRUSTOTAL_API_KEY"])
     otx_url_res = parallel_execute(otx_lookup, urls, api["OTX_API_KEY"])
     url_results = [(u, vt, otx) for (u, vt), (_, otx) in zip(vt_url_res, otx_url_res)]
 
-    # ---------------------- IP EXTRACTION (SAFE) ----------------------
+    # IP Extraction
     raw_header_obj = headers.get("Raw-Headers", "")
 
-    # Convert safely
     try:
         raw = raw_header_obj if isinstance(raw_header_obj, str) else str(raw_header_obj)
     except:
@@ -324,22 +314,17 @@ if __name__ == "__main__":
     if match:
         ip = match.group(0)
 
-        # AbuseIPDB
         abuse = abuseipdb_lookup(api["ABUSEIPDB_API_KEY"], ip)
-
-        # OTX
         otx_ip = otx_lookup(api["OTX_API_KEY"], ip)
-
-        # VT IP lookup not supported in hash/file endpoints
         vt_ip = {"error": "VT IP lookup skipped"}
 
         ip_result = (ip, vt_ip, abuse, otx_ip)
 
-    # ---------------------- ATTACHMENT LOOKUPS ----------------------
+    # Attachments
     hashes = [a["sha256"] for a in attachments]
-    vt_att_res = parallel_execute(vt_hash_lookup, hashes, api["VIRUSTOTAL_API_KEY"])
-    otx_att_res = parallel_execute(otx_lookup, hashes, api["OTX_API_KEY"])
-    attachment_results = [(sha, vt, otx) for (sha, vt), (_, otx) in zip(vt_att_res, otx_att_res)]
+    vt_att = parallel_execute(vt_hash_lookup, hashes, api["VIRUSTOTAL_API_KEY"])
+    otx_att = parallel_execute(otx_lookup, hashes, api["OTX_API_KEY"])
+    attachment_results = [(sha, vt, otx) for (sha, vt), (_, otx) in zip(vt_att, otx_att)]
 
-    # ---------------------- GENERATE EXCEL FILE ----------------------
+    # Generate Excel
     write_to_excel(headers, url_results, ip_result, attachment_results)

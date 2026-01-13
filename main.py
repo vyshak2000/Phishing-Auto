@@ -6,14 +6,14 @@ import base64
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Border, Side, Font
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
 import subprocess
 import platform
 
 
-# ---------------------------------------------------
+# ---------------------------------------------------------
 # LOAD API KEYS
-# ---------------------------------------------------
+# ---------------------------------------------------------
 def load_api_keys(file_path="api_keys.txt"):
     api_keys = {}
     with open(file_path, "r") as f:
@@ -24,9 +24,9 @@ def load_api_keys(file_path="api_keys.txt"):
     return api_keys
 
 
-# ---------------------------------------------------
-# PARSE .MSG FILE DIRECTLY
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# PARSE .MSG FILE
+# ---------------------------------------------------------
 def parse_msg_file(file_path):
     msg = extract_msg.Message(file_path)
 
@@ -40,8 +40,10 @@ def parse_msg_file(file_path):
 
     body = msg.body
 
+    # Extract URLs
     urls = re.findall(r"(https?://[^\s]+)", body)
 
+    # Extract attachments
     attachments = []
     for att in msg.attachments:
         content = att.data
@@ -56,9 +58,9 @@ def parse_msg_file(file_path):
     return headers, body, urls, attachments
 
 
-# ---------------------------------------------------
+# ---------------------------------------------------------
 # VIRUSTOTAL URL LOOKUP
-# ---------------------------------------------------
+# ---------------------------------------------------------
 def vt_url_lookup(api_key, url):
     try:
         encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
@@ -73,9 +75,9 @@ def vt_url_lookup(api_key, url):
         return {"error": str(e)}
 
 
-# ---------------------------------------------------
-# VIRUSTOTAL FILE HASH LOOKUP
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# VIRUSTOTAL HASH LOOKUP
+# ---------------------------------------------------------
 def vt_hash_lookup(api_key, sha256):
     try:
         r = requests.get(
@@ -89,9 +91,9 @@ def vt_hash_lookup(api_key, sha256):
         return {"error": str(e)}
 
 
-# ---------------------------------------------------
+# ---------------------------------------------------------
 # OTX LOOKUP
-# ---------------------------------------------------
+# ---------------------------------------------------------
 def otx_lookup(api_key, indicator):
     try:
         for t in ["IPv4", "url", "file"]:
@@ -104,9 +106,9 @@ def otx_lookup(api_key, indicator):
         return {"error": str(e)}
 
 
-# ---------------------------------------------------
+# ---------------------------------------------------------
 # ABUSEIPDB LOOKUP
-# ---------------------------------------------------
+# ---------------------------------------------------------
 def abuseipdb_lookup(api_key, ip):
     try:
         r = requests.get(
@@ -121,9 +123,9 @@ def abuseipdb_lookup(api_key, ip):
         return {"error": str(e)}
 
 
-# ---------------------------------------------------
-# BEAUTIFY FUNCTIONS
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# BEAUTIFY HELPERS
+# ---------------------------------------------------------
 def beautify_vt(data):
     if "error" in data:
         return "Error"
@@ -147,9 +149,9 @@ def beautify_abuseip(data):
     )
 
 
-# ---------------------------------------------------
-# SEVERITY COLOR CODING
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# COLOR CODING
+# ---------------------------------------------------------
 def apply_color(cell, vt_text=None, abuse_text=None):
     red = PatternFill(start_color="FFC7CE", fill_type="solid")
     yellow = PatternFill(start_color="FFEB9C", fill_type="solid")
@@ -175,84 +177,115 @@ def apply_color(cell, vt_text=None, abuse_text=None):
             cell.fill = green
 
 
-# ---------------------------------------------------
-# MULTITHREAD WRAPPER
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# PARSE RAW HEADERS INTO KEY FIELDS
+# ---------------------------------------------------------
+def extract_field(raw, key):
+    for line in raw.split("\n"):
+        if line.lower().startswith(key.lower()):
+            return line.split(":", 1)[1].strip()
+    return "Not Found"
+
+
+def parse_raw_headers(raw):
+    parsed = {}
+
+    parsed["SPF"] = extract_field(raw, "Received-SPF")
+    parsed["Authentication-Results"] = extract_field(raw, "Authentication-Results")
+    parsed["DKIM"] = extract_field(raw, "DKIM-Signature")
+    parsed["DMARC"] = extract_field(raw, "DMARC")
+    parsed["Return-Path"] = extract_field(raw, "Return-Path")
+    parsed["Content-Type"] = extract_field(raw, "Content-Type")
+    parsed["Message-ID"] = extract_field(raw, "Message-ID")
+    parsed["X-Trellix"] = extract_field(raw, "X-Trellix")
+    parsed["X-IronPort"] = extract_field(raw, "X-IronPort-Anti-Spam-Filtered")
+    parsed["X-ThreatScanner"] = extract_field(raw, "X-ThreatScanner-Verdict")
+
+    # Extract sender IP
+    ips = re.findall(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", raw)
+    parsed["Sender-IP"] = ips[-1] if ips else "Not Found"
+
+    return parsed
+
+
+# ---------------------------------------------------------
+# MULTITHREADED REPUTATION REQUESTS
+# ---------------------------------------------------------
 def parallel_execute(func, items, *args):
     results = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         mapper = {executor.submit(func, *args, item): item for item in items}
         for future in as_completed(mapper):
-            ind = mapper[future]
+            item = mapper[future]
             try:
-                results.append((ind, future.result()))
+                results.append((item, future.result()))
             except Exception as e:
-                results.append((ind, {"error": str(e)}))
+                results.append((item, {"error": str(e)}))
     return results
 
 
-# ---------------------------------------------------
-# EXCEL REPORT GENERATION
-# ---------------------------------------------------
-def write_to_excel(headers, url_results, ip_result, attachment_results, output="email_report.xlsx"):
+# ---------------------------------------------------------
+# CREATE EXCEL REPORT (3 sheets)
+# ---------------------------------------------------------
+def write_to_excel(headers, parsed_fields, url_results, ip_result, attachment_results, output="email_report.xlsx"):
     wb = Workbook()
 
-    # ---------------- HEADERS SHEET ----------------
+    # ---------------- SHEET 1: RAW HEADERS ----------------
     ws1 = wb.active
-    ws1.title = "Headers"
-    ws1.append(["Field", "Value"])
+    ws1.title = "Raw Headers"
+    ws1["A1"] = "Raw Headers"
+    ws1["A2"] = headers["Raw-Headers"]
+    ws1["A2"].alignment = Alignment(wrapText=True)
+    ws1.merge_cells("A2:D200")
 
-    for k, v in headers.items():
+    # ---------------- SHEET 2: PARSED HEADER ANALYSIS ----------------
+    ws2 = wb.create_sheet("Header Analysis")
+    ws2.append(["Field", "Value"])
 
-        # SANITIZATION FIX
-        if isinstance(v, bytes):
-            v = v.decode(errors="ignore")
-        elif not isinstance(v, str):
-            v = str(v)
+    for k, v in parsed_fields.items():
+        ws2.append([k, v])
 
-        ws1.append([k, v])
-
-    # ---------------- REPUTATION SHEET ----------------
-    ws2 = wb.create_sheet("Reputation")
-    ws2.append(["Type", "Indicator", "VirusTotal", "AbuseIPDB", "OTX"])
+    # ---------------- SHEET 3: REPUTATION ----------------
+    ws3 = wb.create_sheet("Reputation")
+    ws3.append(["Type", "Indicator", "VirusTotal", "AbuseIPDB", "OTX"])
 
     row = 2
 
-    # URLS
+    # URL Reputation
     for url, vt, otx in url_results:
         vt_text = beautify_vt(vt)
         otx_text = beautify_otx(otx)
-        ws2.append(["URL", url, vt_text, "N/A", otx_text])
-        apply_color(ws2[f"C{row}"], vt_text, None)
+        ws3.append(["URL", url, vt_text, "N/A", otx_text])
+        apply_color(ws3[f"C{row}"], vt_text)
         row += 1
 
-    # IP Info
+    # IP Reputation
     if ip_result:
         ip, vt_ip, abuse, otx_ip = ip_result
         vt_text = beautify_vt(vt_ip)
         abuse_text = beautify_abuseip(abuse)
         otx_text = beautify_otx(otx_ip)
 
-        ws2.append(["IP", ip, vt_text, abuse_text, otx_text])
-        apply_color(ws2[f"C{row}"], vt_text)
-        apply_color(ws2[f"D{row}"], None, abuse_text)
+        ws3.append(["IP", ip, vt_text, abuse_text, otx_text])
+        apply_color(ws3[f"C{row}"], vt_text)
+        apply_color(ws3[f"D{row}"], None, abuse_text)
         row += 1
 
-    # ATTACHMENTS
+    # Attachment Hash Reputation
     for sha, vt, otx in attachment_results:
         vt_text = beautify_vt(vt)
         otx_text = beautify_otx(otx)
-        ws2.append(["Attachment", sha, vt_text, "N/A", otx_text])
-        apply_color(ws2[f"C{row}"], vt_text, None)
+        ws3.append(["Attachment", sha, vt_text, "N/A", otx_text])
+        apply_color(ws3[f"C{row}"], vt_text)
         row += 1
 
-    # ---------------- STYLING ----------------
+    # ---------- FORMATTING: Borders + Header Style ----------
     thin = Side(style="thin")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     header_fill = PatternFill(start_color="4B0082", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
 
-    for sheet in [ws1, ws2]:
+    for sheet in [ws2, ws3]:
         for cell in sheet[1]:
             cell.fill = header_fill
             cell.font = header_font
@@ -263,15 +296,15 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
                 cell.border = border
 
     # Auto column width
-    for sheet in [ws1, ws2]:
+    for sheet in [ws2, ws3]:
         for col in sheet.columns:
             max_len = max(len(str(c.value)) if c.value else 0 for c in col)
             sheet.column_dimensions[col[0].column_letter].width = max_len + 3
 
     wb.save(output)
-    print(f"\n[+] Excel report generated: {output}")
+    print(f"[+] Excel report generated: {output}")
 
-    # Auto open file
+    # Auto-open file
     try:
         if platform.system() == "Windows":
             os.startfile(output)
@@ -280,51 +313,43 @@ def write_to_excel(headers, url_results, ip_result, attachment_results, output="
         else:
             subprocess.call(["xdg-open", output])
     except:
-        print("[!] Could not automatically open the file.")
+        print("[!] Could not open Excel automatically.")
 
 
-# ---------------------------------------------------
-# MAIN LOGIC
-# ---------------------------------------------------
+# ---------------------------------------------------------
+# MAIN EXECUTION LOGIC
+# ---------------------------------------------------------
 if __name__ == "__main__":
 
-    input_file = "sample.msg"  # <--- Change this
+    input_file = "sample.msg"  # MODIFY HERE
 
     api = load_api_keys()
 
     headers, body, urls, attachments = parse_msg_file(input_file)
 
-    # URL reputation
+    # -------- Parse Raw Headers Into Key Fields --------
+    raw_header_text = headers.get("Raw-Headers", "")
+    parsed_fields = parse_raw_headers(raw_header_text)
+
+    # -------- URL Reputation --------
     vt_url_res = parallel_execute(vt_url_lookup, urls, api["VIRUSTOTAL_API_KEY"])
     otx_url_res = parallel_execute(otx_lookup, urls, api["OTX_API_KEY"])
     url_results = [(u, vt, otx) for (u, vt), (_, otx) in zip(vt_url_res, otx_url_res)]
 
-    # IP Extraction
-    raw_header_obj = headers.get("Raw-Headers", "")
-
-    try:
-        raw = raw_header_obj if isinstance(raw_header_obj, str) else str(raw_header_obj)
-    except:
-        raw = ""
-
-    match = re.search(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", raw)
-
+    # -------- IP Reputation --------
+    sender_ip = parsed_fields["Sender-IP"]
     ip_result = None
+    if sender_ip != "Not Found":
+        abuse = abuseipdb_lookup(api["ABUSEIPDB_API_KEY"], sender_ip)
+        otx_ip = otx_lookup(api["OTX_API_KEY"], sender_ip)
+        vt_ip = {"error": "VT does not support IP reputation"}
+        ip_result = (sender_ip, vt_ip, abuse, otx_ip)
 
-    if match:
-        ip = match.group(0)
-
-        abuse = abuseipdb_lookup(api["ABUSEIPDB_API_KEY"], ip)
-        otx_ip = otx_lookup(api["OTX_API_KEY"], ip)
-        vt_ip = {"error": "VT IP lookup skipped"}
-
-        ip_result = (ip, vt_ip, abuse, otx_ip)
-
-    # Attachments
+    # -------- Attachment Reputation --------
     hashes = [a["sha256"] for a in attachments]
     vt_att = parallel_execute(vt_hash_lookup, hashes, api["VIRUSTOTAL_API_KEY"])
     otx_att = parallel_execute(otx_lookup, hashes, api["OTX_API_KEY"])
     attachment_results = [(sha, vt, otx) for (sha, vt), (_, otx) in zip(vt_att, otx_att)]
 
-    # Generate Excel
-    write_to_excel(headers, url_results, ip_result, attachment_results)
+    # -------- Write Excel File --------
+    write_to_excel(headers, parsed_fields, url_results, ip_result, attachment_results)

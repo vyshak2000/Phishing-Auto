@@ -1,0 +1,51 @@
+import extract_msg
+import os
+from pathlib import Path
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+MSG_FILE = "sample.msg"   # input .msg file
+TXT_OUTPUT = "raw_headers.txt"
+RTF_OUTPUT = "raw_headers.rtf"
+
+# -----------------------------
+# VALIDATE INPUT
+# -----------------------------
+if not os.path.exists(MSG_FILE):
+    raise FileNotFoundError(f"{MSG_FILE} not found")
+
+# -----------------------------
+# LOAD MSG FILE
+# -----------------------------
+msg = extract_msg.Message(MSG_FILE)
+msg.process()
+
+# -----------------------------
+# EXTRACT RAW HEADERS
+# -----------------------------
+raw_headers = msg.header
+
+if not raw_headers:
+    raise ValueError("No headers found in the .msg file")
+
+# -----------------------------
+# SAVE AS TXT
+# -----------------------------
+with open(TXT_OUTPUT, "w", encoding="utf-8", errors="ignore") as f:
+    f.write(raw_headers)
+
+# -----------------------------
+# SAVE AS RTF
+# -----------------------------
+rtf_content = r"""{\rtf1\ansi\deff0
+{\fonttbl{\f0 Courier New;}}
+\f0\fs20
+""" + raw_headers.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}") + "}"
+
+with open(RTF_OUTPUT, "w", encoding="utf-8", errors="ignore") as f:
+    f.write(rtf_content)
+
+print("[+] Raw headers extracted successfully")
+print(f"[+] Saved to {TXT_OUTPUT}")
+print(f"[+] Saved to {RTF_OUTPUT}")

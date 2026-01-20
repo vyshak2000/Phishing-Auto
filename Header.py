@@ -1,109 +1,117 @@
-from striprtf.striprtf import rtf_to_text
-from email.parser import Parser
-from email.policy import default
-from pathlib import Path
+import os
+import sys
 import pandas as pd
-from openpyxl.styles import PatternFill
+from email import policy
+from email.parser import Parser
+from authheaders import AuthenticationResultsParser
 
-# ---------------- CONFIG ----------------
-INPUT_FILE = "raw_headers.rtf"
-OUTPUT_FILE = "headers_analysis.xlsx"
-# ----------------------------------------
+# -----------------------------
+# CONFIG
+# -----------------------------
+RAW_HEADERS_FILE = "raw_headers.txt"
+OUTPUT_EXCEL = "headers.xlsx"
 
+# -----------------------------
+# READ RAW HEADERS
+# -----------------------------
+if not os.path.exists(RAW_HEADERS_FILE):
+    print(f"[!] {RAW_HEADERS_FILE} not found")
+    sys.exit(1)
 
-def read_rtf_headers(file_path):
-    rtf_content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
-    return rtf_to_text(rtf_content).strip()
+with open(RAW_HEADERS_FILE, "r", encoding="utf-8", errors="ignore") as f:
+    raw_headers = f.read()
 
+# -----------------------------
+# PARSE EMAIL HEADERS
+# -----------------------------
+parser = Parser(policy=policy.default)
+msg = parser.parsestr(raw_headers)
 
-def parse_headers(raw_headers):
-    parser = Parser(policy=default)
-    return parser.parsestr(raw_headers)
+# -----------------------------
+# BASIC HEADER EXTRACTION
+# -----------------------------
+results = []
 
+def add_result(category, name, value):
+    results.append({
+        "Category": category,
+        "Header": name,
+        "Value": value
+    })
 
-def headers_to_dataframe(msg):
-    rows = []
-    for key, value in msg.items():
-        rows.append({
-            "Header": key,
-            "Value": value.replace("\n", " ").strip()
-        })
-    return pd.DataFrame(rows)
+basic_headers = [
+    "From", "To", "Subject", "Date",
+    "Message-ID", "Return-Path",
+    "Reply-To", "MIME-Version"
+]
 
+for h in basic_headers:
+    add_result("Basic", h, msg.get(h, "Not Found"))
 
-def received_to_dataframe(msg):
-    received_headers = msg.get_all("Received", [])
-    rows = []
-    for i, hop in enumerate(received_headers, start=1):
-        rows.append({
-            "Hop": i,
-            "Details": hop.replace("\n", " ").strip()
-        })
-    return pd.DataFrame(rows)
+# -----------------------------
+# RECEIVED HEADERS (MAIL PATH)
+# -----------------------------
+received_headers = msg.get_all("Received", [])
 
+if received_headers:
+    for idx, rec in enumerate(received_headers, start=1):
+        add_result("Mail Path", f"Received #{idx}", rec)
+else:
+    add_result("Mail Path", "Received", "Not Found")
 
-def auth_to_dataframe(msg):
-    auth_header = msg.get("Authentication-Results")
+# -----------------------------
+# AUTHENTICATION RESULTS
+# -----------------------------
+auth_results_raw = msg.get_all("Authentication-Results", [])
 
-    if not auth_header:
-        return pd.DataFrame(columns=["Check", "Result"])
+if auth_results_raw:
+    for ar in auth_results_raw:
+        try:
+            parsed = AuthenticationResultsParser.parse(ar)
 
-    rows = []
-    for part in auth_header.split(";"):
-        part = part.strip()
-        if "=" in part:
-            check, result = part.split("=", 1)
-            rows.append({
-                "Check": check.strip(),
-                "Result": result.strip()
-            })
+            for method, result in parsed.results.items():
+                value = f"{result.result}"
+                if result.comment:
+                    value += f" ({result.comment})"
+                add_result("Authentication", method.upper(), value)
 
-    return pd.DataFrame(rows)
+        except Exception as e:
+            add_result("Authentication", "Authentication-Results", ar)
+else:
+    add_result("Authentication", "Authentication-Results", "Not Found")
 
+# -----------------------------
+# SPF / DKIM / DMARC SUMMARY
+# -----------------------------
+def extract_auth_summary(auth_type):
+    for r in results:
+        if r["Header"].lower() == auth_type.lower():
+            return r["Value"]
+    return "Not Found"
 
-def apply_auth_coloring(writer):
-    sheet = writer.book["Authentication"]
+add_result("Summary", "SPF", extract_auth_summary("spf"))
+add_result("Summary", "DKIM", extract_auth_summary("dkim"))
+add_result("Summary", "DMARC", extract_auth_summary("dmarc"))
 
-    green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    red = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    orange = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-    grey = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+# -----------------------------
+# CREATE EXCEL
+# -----------------------------
+df = pd.DataFrame(results)
 
-    for row in sheet.iter_rows(min_row=2, min_col=2, max_col=2):
-        cell = row[0]
-        if not cell.value:
-            continue
+with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name="Header Analysis")
 
-        value = cell.value.lower()
+print(f"[+] Analysis written to {OUTPUT_EXCEL}")
 
-        if "pass" in value:
-            cell.fill = green
-        elif "fail" in value:
-            cell.fill = red
-        elif any(x in value for x in ["softfail", "neutral", "temperror"]):
-            cell.fill = orange
-        elif "none" in value:
-            cell.fill = grey
-
-
-def export_to_excel(headers_df, received_df, auth_df):
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        headers_df.to_excel(writer, sheet_name="Headers", index=False)
-        received_df.to_excel(writer, sheet_name="Received_Hops", index=False)
-        auth_df.to_excel(writer, sheet_name="Authentication", index=False)
-
-        apply_auth_coloring(writer)
-
-
-# ---------------- MAIN ----------------
-if __name__ == "__main__":
-    raw_headers = read_rtf_headers(INPUT_FILE)
-    msg = parse_headers(raw_headers)
-
-    headers_df = headers_to_dataframe(msg)
-    received_df = received_to_dataframe(msg)
-    auth_df = auth_to_dataframe(msg)
-
-    export_to_excel(headers_df, received_df, auth_df)
-
-    print(f"✔ Excel exported successfully: {OUTPUT_FILE}")
+# -----------------------------
+# AUTO OPEN EXCEL FILE
+# -----------------------------
+try:
+    if sys.platform.startswith("win"):
+        os.startfile(OUTPUT_EXCEL)
+    elif sys.platform.startswith("darwin"):
+        os.system(f"open {OUTPUT_EXCEL}")
+    else:
+        os.system(f"xdg-open {OUTPUT_EXCEL}")
+except Exception as e:
+    print(f"[!] Could not auto-open file: {e}")

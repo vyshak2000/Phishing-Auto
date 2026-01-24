@@ -1,5 +1,4 @@
 import re
-import os
 import ipaddress
 import base64
 import requests
@@ -11,10 +10,23 @@ from extract_msg import Message
 
 RAW_HEADERS_FILE = "raw_headers.txt"
 MSG_FILE = "sample.msg"
+API_KEYS_FILE = "api_keys.txt"
 OUTPUT_FILE = "analysis.xlsx"
 
-VT_API_KEY = os.getenv("VT_API_KEY")
 VT_BASE_URL = "https://www.virustotal.com/api/v3"
+
+
+# ================= API KEY LOADER =================
+
+def load_virustotal_key(path):
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("VIRUSTOTAL_API_KEY"):
+                return line.split("=", 1)[1].strip()
+    raise RuntimeError("VIRUSTOTAL_API_KEY not found in api_keys.txt")
+
+
+VT_API_KEY = load_virustotal_key(API_KEYS_FILE)
 
 
 # ================= IP EXTRACTION =================
@@ -30,8 +42,7 @@ def extract_public_ips_from_headers(path):
 
     for ip in found_ips:
         try:
-            ip_obj = ipaddress.ip_address(ip)
-            if ip_obj.is_global:  # removes private, loopback, reserved, multicast
+            if ipaddress.ip_address(ip).is_global:
                 public_ips.append(ip)
         except ValueError:
             pass
@@ -86,9 +97,6 @@ def vt_url_reputation(url):
 # ================= MAIN =================
 
 def main():
-    if not VT_API_KEY:
-        raise RuntimeError("VT_API_KEY environment variable not set")
-
     ips = extract_public_ips_from_headers(RAW_HEADERS_FILE)
     urls = extract_urls_from_msg(MSG_FILE)
 

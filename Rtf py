@@ -1,51 +1,158 @@
 import extract_msg
+import re
+import hashlib
+import requests
+import base64
 import os
-from pathlib import Path
+import platform
+import subprocess
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-MSG_FILE = "sample.msg"   # input .msg file
-TXT_OUTPUT = "raw_headers.txt"
-RTF_OUTPUT = "raw_headers.rtf"
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Border, Side, Font
 
-# -----------------------------
-# VALIDATE INPUT
-# -----------------------------
-if not os.path.exists(MSG_FILE):
-    raise FileNotFoundError(f"{MSG_FILE} not found")
 
-# -----------------------------
-# LOAD MSG FILE
-# -----------------------------
-msg = extract_msg.Message(MSG_FILE)
-msg.process()
+# ==================================================
+# LOAD API KEYS
+# ==================================================
 
-# -----------------------------
-# EXTRACT RAW HEADERS
-# -----------------------------
-raw_headers = msg.header
+def load_api_keys(file_path="api_keys.txt"):
+    keys = {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                keys[k] = v
+    return keys
 
-if not raw_headers:
-    raise ValueError("No headers found in the .msg file")
 
-# -----------------------------
-# SAVE AS TXT
-# -----------------------------
-with open(TXT_OUTPUT, "w", encoding="utf-8", errors="ignore") as f:
-    f.write(raw_headers)
+# ==================================================
+# EXTRACT URLs & ATTACHMENT HASHES FROM MSG
+# ==================================================
 
-# -----------------------------
-# SAVE AS RTF
-# -----------------------------
-rtf_content = r"""{\rtf1\ansi\deff0
-{\fonttbl{\f0 Courier New;}}
-\f0\fs20
-""" + raw_headers.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}") + "}"
+def extract_msg_indicators(msg_path):
+    msg = extract_msg.Message(msg_path)
+    body = msg.body or ""
 
-with open(RTF_OUTPUT, "w", encoding="utf-8", errors="ignore") as f:
-    f.write(rtf_content)
+    urls = re.findall(r"https?://[^\s<>'\"]+", body)
 
-print("[+] Raw headers extracted successfully")
-print(f"[+] Saved to {TXT_OUTPUT}")
-print(f"[+] Saved to {RTF_OUTPUT}")
+    attachments = []
+    for att in msg.attachments:
+        sha = hashlib.sha256(att.data).hexdigest()
+        attachments.append(sha)
+
+    return list(set(urls)), list(set(attachments))
+
+
+# ==================================================
+# VIRUSTOTAL LOOKUPS
+# ==================================================
+
+def vt_url(api_key, url):
+    try:
+        encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+        r = requests.get(
+            f"https://www.virustotal.com/api/v3/urls/{encoded}",
+            headers={"x-apikey": api_key},
+            timeout=15
+        )
+
+        if r.status_code != 200:
+            return f"VT URL Error {r.status_code}"
+
+        stats = r.json()["data"]["attributes"]["last_analysis_stats"]
+        return f"M:{stats['malicious']} S:{stats['suspicious']} H:{stats['harmless']}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def vt_hash(api_key, sha):
+    try:
+        r = requests.get(
+            f"https://www.virustotal.com/api/v3/files/{sha}",
+            headers={"x-apikey": api_key},
+            timeout=15
+        )
+
+        if r.status_code != 200:
+            return f"VT Hash Error {r.status_code}"
+
+        stats = r.json()["data"]["attributes"]["last_analysis_stats"]
+        return f"M:{stats['malicious']} S:{stats['suspicious']} H:{stats['harmless']}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ==================================================
+# EXCEL OUTPUT
+# ==================================================
+
+def write_excel(rep_urls, rep_hashes, output="zz.xlsx"):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Reputation"
+
+    ws.append(["Type", "Indicator", "VirusTotal"])
+
+    for url, vt in rep_urls:
+        ws.append(["URL", url, vt])
+
+    for h, vt in rep_hashes:
+        ws.append(["HASH", h, vt])
+
+    # ---------- Formatting ----------
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill(start_color="4B0082", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.border = border
+
+    # Auto column width
+    for col in ws.columns:
+        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+        ws.column_dimensions[col[0].column_letter].width = max_len + 3
+
+    wb.save(output)
+
+    # Auto-open
+    try:
+        if platform.system() == "Windows":
+            os.startfile(output)
+        elif platform.system() == "Darwin":
+            subprocess.call(["open", output])
+        else:
+            subprocess.call(["xdg-open", output])
+    except:
+        pass
+
+
+# ==================================================
+# MAIN
+# ==================================================
+
+if __name__ == "__main__":
+    msg_file = "sample.msg"
+
+    api = load_api_keys()
+    vt_key = api["VIRUSTOTAL_API_KEY"]
+
+    urls, hashes = extract_msg_indicators(msg_file)
+
+    rep_urls = []
+    for url in urls:
+        vt = vt_url(vt_key, url)
+        rep_urls.append((url, vt))
+
+    rep_hashes = []
+    for h in hashes:
+        vt = vt_hash(vt_key, h)
+        rep_hashes.append((h, vt))
+
+    write_excel(rep_urls, rep_hashes, output="zz.xlsx")

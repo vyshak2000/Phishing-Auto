@@ -6,8 +6,6 @@ import pandas as pd
 from extract_msg import Message
 
 
-# ================= CONFIG =================
-
 RAW_HEADERS_FILE = "raw_headers.txt"
 MSG_FILE = "sample.msg"
 API_KEYS_FILE = "api_keys.txt"
@@ -18,15 +16,15 @@ VT_BASE_URL = "https://www.virustotal.com/api/v3"
 
 # ================= API KEY LOADER =================
 
-def load_virustotal_key(path):
+def load_vt_key(path):
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            if line.startswith("VIRUSTOTAL_API_KEY"):
+            if line.startswith("VT_KEY"):
                 return line.split("=", 1)[1].strip()
-    raise RuntimeError("VIRUSTOTAL_API_KEY not found in api_keys.txt")
+    raise RuntimeError("VT_KEY not found in api_keys.txt")
 
 
-VT_API_KEY = load_virustotal_key(API_KEYS_FILE)
+VT_API_KEY = load_vt_key(API_KEYS_FILE)
 
 
 # ================= IP EXTRACTION =================
@@ -100,10 +98,10 @@ def main():
     ips = extract_public_ips_from_headers(RAW_HEADERS_FILE)
     urls = extract_urls_from_msg(MSG_FILE)
 
-    ip_results = []
+    ip_rows = []
     for ip in ips:
         vt = vt_ip_reputation(ip)
-        ip_results.append({
+        ip_rows.append({
             "IP Address": ip,
             "VT_Malicious": vt.get("malicious") if vt else None,
             "VT_Suspicious": vt.get("suspicious") if vt else None,
@@ -111,10 +109,10 @@ def main():
             "VT_Undetected": vt.get("undetected") if vt else None
         })
 
-    url_results = []
+    url_rows = []
     for url in urls:
         vt = vt_url_reputation(url)
-        url_results.append({
+        url_rows.append({
             "URL": url,
             "VT_Malicious": vt.get("malicious") if vt else None,
             "VT_Suspicious": vt.get("suspicious") if vt else None,
@@ -122,8 +120,8 @@ def main():
             "VT_Undetected": vt.get("undetected") if vt else None
         })
 
-    df_ips = pd.DataFrame(ip_results)
-    df_urls = pd.DataFrame(url_results)
+    df_ips = pd.DataFrame(ip_rows)
+    df_urls = pd.DataFrame(url_rows)
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df_ips.to_excel(writer, index=False, sheet_name="IPs")

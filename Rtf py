@@ -1,158 +1,147 @@
-import extract_msg
 import re
-import hashlib
-import requests
-import base64
 import os
-import platform
-import subprocess
+import sys
+import base64
+import ipaddress
+import requests
+import pandas as pd
+from extract_msg import Message
 
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Border, Side, Font
+
+RAW_HEADERS_FILE = "raw_headers.txt"
+MSG_FILE = "sample.msg"
+API_KEYS_FILE = "api_keys.txt"
+OUTPUT_FILE = "analysis.xlsx"
+
+VT_BASE_URL = "https://www.virustotal.com/api/v3"
 
 
-# ==================================================
-# LOAD API KEYS
-# ==================================================
+# ================= API KEY =================
 
-def load_api_keys(file_path="api_keys.txt"):
-    keys = {}
-    with open(file_path, "r", encoding="utf-8") as f:
+def load_api_key(path="api_keys.txt"):
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            if "=" in line:
-                k, v = line.strip().split("=", 1)
-                keys[k] = v
-    return keys
+            if line.startswith("VIRUSTOTAL_API_KEY"):
+                return line.split("=", 1)[1].strip()
+    raise RuntimeError("VIRUSTOTAL_API_KEY not found")
 
 
-# ==================================================
-# EXTRACT URLs & ATTACHMENT HASHES FROM MSG
-# ==================================================
+VT_API_KEY = load_api_key(API_KEYS_FILE)
 
-def extract_msg_indicators(msg_path):
-    msg = extract_msg.Message(msg_path)
+
+def vt_headers():
+    return {"x-apikey": VT_API_KEY}
+
+
+# ================= IP EXTRACTION =================
+
+def extract_public_ips_from_headers(path):
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+
+    ip_regex = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+    found_ips = set(re.findall(ip_regex, content))
+
+    public_ips = []
+    for ip in found_ips:
+        try:
+            if ipaddress.ip_address(ip).is_global:
+                public_ips.append(ip)
+        except ValueError:
+            pass
+
+    return sorted(public_ips)
+
+
+# ================= URL EXTRACTION =================
+
+def extract_urls_from_msg(path):
+    msg = Message(path)
     body = msg.body or ""
 
-    urls = re.findall(r"https?://[^\s<>'\"]+", body)
-
-    attachments = []
-    for att in msg.attachments:
-        sha = hashlib.sha256(att.data).hexdigest()
-        attachments.append(sha)
-
-    return list(set(urls)), list(set(attachments))
+    url_regex = r'https?://[^\s<>"\']+'
+    return sorted(set(re.findall(url_regex, body)))
 
 
-# ==================================================
-# VIRUSTOTAL LOOKUPS
-# ==================================================
+# ================= VIRUSTOTAL LOOKUPS =================
 
-def vt_url(api_key, url):
-    try:
-        encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-        r = requests.get(
-            f"https://www.virustotal.com/api/v3/urls/{encoded}",
-            headers={"x-apikey": api_key},
-            timeout=15
-        )
+def vt_ip_lookup(ip):
+    r = requests.get(
+        f"{VT_BASE_URL}/ip_addresses/{ip}",
+        headers=vt_headers(),
+        timeout=15
+    )
 
-        if r.status_code != 200:
-            return f"VT URL Error {r.status_code}"
+    if r.status_code != 200:
+        return None
 
-        stats = r.json()["data"]["attributes"]["last_analysis_stats"]
-        return f"M:{stats['malicious']} S:{stats['suspicious']} H:{stats['harmless']}"
-    except Exception as e:
-        return f"Error: {e}"
+    return r.json()["data"]["attributes"]["last_analysis_stats"]
 
 
-def vt_hash(api_key, sha):
-    try:
-        r = requests.get(
-            f"https://www.virustotal.com/api/v3/files/{sha}",
-            headers={"x-apikey": api_key},
-            timeout=15
-        )
+def vt_url_lookup(url):
+    encoded = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
-        if r.status_code != 200:
-            return f"VT Hash Error {r.status_code}"
+    r = requests.get(
+        f"{VT_BASE_URL}/urls/{encoded}",
+        headers=vt_headers(),
+        timeout=15
+    )
 
-        stats = r.json()["data"]["attributes"]["last_analysis_stats"]
-        return f"M:{stats['malicious']} S:{stats['suspicious']} H:{stats['harmless']}"
-    except Exception as e:
-        return f"Error: {e}"
+    if r.status_code != 200:
+        return None
+
+    return r.json()["data"]["attributes"]["last_analysis_stats"]
 
 
-# ==================================================
-# EXCEL OUTPUT
-# ==================================================
+# ================= MAIN =================
 
-def write_excel(rep_urls, rep_hashes, output="zz.xlsx"):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Reputation"
+def main():
+    ips = extract_public_ips_from_headers(RAW_HEADERS_FILE)
+    urls = extract_urls_from_msg(MSG_FILE)
 
-    ws.append(["Type", "Indicator", "VirusTotal"])
+    ip_rows = []
+    for ip in ips:
+        vt = vt_ip_lookup(ip)
+        ip_rows.append({
+            "IP Address": ip,
+            "VT_Malicious": vt.get("malicious") if vt else None,
+            "VT_Suspicious": vt.get("suspicious") if vt else None,
+            "VT_Harmless": vt.get("harmless") if vt else None,
+            "VT_Undetected": vt.get("undetected") if vt else None
+        })
 
-    for url, vt in rep_urls:
-        ws.append(["URL", url, vt])
+    url_rows = []
+    for url in urls:
+        vt = vt_url_lookup(url)
+        url_rows.append({
+            "URL": url,
+            "VT_Malicious": vt.get("malicious") if vt else None,
+            "VT_Suspicious": vt.get("suspicious") if vt else None,
+            "VT_Harmless": vt.get("harmless") if vt else None,
+            "VT_Undetected": vt.get("undetected") if vt else None
+        })
 
-    for h, vt in rep_hashes:
-        ws.append(["HASH", h, vt])
+    df_ips = pd.DataFrame(ip_rows)
+    df_urls = pd.DataFrame(url_rows)
 
-    # ---------- Formatting ----------
-    thin = Side(style="thin")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    header_fill = PatternFill(start_color="4B0082", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
+    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+        df_ips.to_excel(writer, index=False, sheet_name="IPs")
+        df_urls.to_excel(writer, index=False, sheet_name="URLs")
 
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.border = border
-
-    for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            cell.border = border
-
-    # Auto column width
-    for col in ws.columns:
-        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
-        ws.column_dimensions[col[0].column_letter].width = max_len + 3
-
-    wb.save(output)
+    print("[+] VirusTotal enrichment completed")
+    print("[+] Output saved as analysis.xlsx")
 
     # Auto-open
     try:
-        if platform.system() == "Windows":
-            os.startfile(output)
-        elif platform.system() == "Darwin":
-            subprocess.call(["open", output])
+        if sys.platform.startswith("win"):
+            os.startfile(OUTPUT_FILE)
+        elif sys.platform.startswith("darwin"):
+            os.system(f"open {OUTPUT_FILE}")
         else:
-            subprocess.call(["xdg-open", output])
+            os.system(f"xdg-open {OUTPUT_FILE}")
     except:
         pass
 
 
-# ==================================================
-# MAIN
-# ==================================================
-
 if __name__ == "__main__":
-    msg_file = "sample.msg"
-
-    api = load_api_keys()
-    vt_key = api["VIRUSTOTAL_API_KEY"]
-
-    urls, hashes = extract_msg_indicators(msg_file)
-
-    rep_urls = []
-    for url in urls:
-        vt = vt_url(vt_key, url)
-        rep_urls.append((url, vt))
-
-    rep_hashes = []
-    for h in hashes:
-        vt = vt_hash(vt_key, h)
-        rep_hashes.append((h, vt))
-
-    write_excel(rep_urls, rep_hashes, output="zz.xlsx")
+    main()
